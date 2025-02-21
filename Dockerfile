@@ -14,7 +14,7 @@ RUN pip install --no-cache-dir \
     colorlog==6.9.0 \
     fastapi==0.115.8 \
     python-dotenv==1.0.1 \
-    "uvicorn[standard]"
+    "uvicorn[standard]" -i https://pypi.tuna.tsinghua.edu.cn/simple
 
 # 复制项目文件
 COPY ./app ./app

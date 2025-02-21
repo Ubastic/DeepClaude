@@ -31,7 +31,7 @@ class BaseClient(ABC):
                 async with session.post(self.api_url, headers=headers, json=data) as response:
                     if response.status != 200:
                         error_text = await response.text()
-                        logger.error(f"API 请求失败: {error_text}")
+                        logger.error(f"API 请求失败: {data}{headers}{self.api_url}{error_text}")
                         return
                         
                     async for chunk in response.content.iter_any():

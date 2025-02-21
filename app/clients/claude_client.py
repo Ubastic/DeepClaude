@@ -1,22 +1,166 @@
 """Claude API 客户端"""
 import json
-from typing import AsyncGenerator
+import random
+from typing import AsyncGenerator,Optional,List
 from app.utils.logger import logger
 from .base_client import BaseClient
+import aiohttp
+class TokenManager:
+    def __init__(self, token_file: str):
+        """初始化 Token 管理器
+        
+        Args:
+            token_file: token 配置文件路径
+        """
+        self.token_file = token_file
+        self.tokens: List[dict] = []
+        self.current_token_index = 0
+        self.load_tokens()
+        
+    def load_tokens(self):
+        """从文件加载 tokens"""
+        try:
+            with open(self.token_file, 'r', encoding='utf-8') as f:
+                self.tokens = json.load(f)
+                logger.info(f"成功加载 {len(self.tokens)} 个 token")
+        except Exception as e:
+            logger.error(f"加载 token 文件失败: {e}")
+            self.tokens = []
+            
+    def get_next_token(self) -> Optional[str]:
+        """获取下一个可用的 token
+        
+        Returns:
+            str | None: 下一个 token，如果没有可用 token 则返回 None
+        """
+        if not self.tokens:
+            return None
+            
+        # 记录初始索引
+        start_index = self.current_token_index
+        
+        while True:
+            token_info = self.tokens[self.current_token_index]
+            # 如果 token 未被标记为已用完，则返回
+            if not token_info.get("exhausted", False):
+                logger.info(f"使用 token {self.current_token_index + 1}/{len(self.tokens)}")
+                return token_info["token"]
+                
+            # 移动到下一个 token
+            self.current_token_index = (self.current_token_index + 1) % len(self.tokens)
+            
+            # 如果已经检查了所有 token，退出循环
+            if self.current_token_index == start_index:
+                logger.error("所有 token 已用完")
+                return None
+                
+    def mark_token_exhausted(self, token: str):
+        """标记某个 token 已用完
+        
+        Args:
+            token: 要标记的 token
+        """
+        for i, token_info in enumerate(self.tokens):
+            if token_info["token"] == token:
+                token_info["exhausted"] = True
+                logger.warning(f"Token {i + 1}/{len(self.tokens)} 已标记为用完")
+                # 移动到下一个 token
+                self.current_token_index = (i + 1) % len(self.tokens)
+                break
 
+    def reset_exhausted_status(self):
+        """重置所有 token 的使用状态"""
+        for token_info in self.tokens:
+            token_info["exhausted"] = False
+        logger.info("已重置所有 token 的使用状态")
 
 class ClaudeClient(BaseClient):
-    def __init__(self, api_key: str, api_url: str = "https://api.anthropic.com/v1/messages", provider: str = "anthropic"):
+    def __init__(self, api_key: str,token_file:str, api_url: str = "https://api.anthropic.com/v1/messages", provider: str = "anthropic"):
         """初始化 Claude 客户端
         
         Args:
+            
             api_key: Claude API密钥
             api_url: Claude API地址
             is_openrouter: 是否使用 OpenRouter API
         """
-        super().__init__(api_key, api_url)
+        self.token_manager = TokenManager(token_file)
+        initial_token = self.token_manager.get_next_token()
+        if not initial_token and api_key:
+            raise ValueError("没有可用的 token")
+        if api_key:
+            super().__init__(api_key, api_url)
+        else:
+            super().__init__(initial_token, api_url)
         self.provider = provider
-        
+    
+    async def _make_request(self, headers: dict, data: dict) -> AsyncGenerator[bytes, None]:
+        """发送请求并处理响应，支持 token 轮换
+
+        Args:
+            headers: 请求头
+            data: 请求数据
+
+        Yields:
+            bytes: 原始响应数据
+        """
+        while True:
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(self.api_url, headers=headers, json=data) as response:
+                        if response.status != 200:
+                            error_text = await response.text()
+
+                            # 检查是否是配额不足错误
+                            try:
+                                error_data = json.loads(error_text)
+                                error_code = error_data.get("error", {}).get("code")
+                                if error_code == "insufficient_user_quota":
+                                    # 标记当前 token 已用完
+                                    self.token_manager.mark_token_exhausted(self.api_key)
+
+                                    # 获取下一个 token
+                                    next_token = self.token_manager.get_next_token()
+                                    if not next_token:
+                                        logger.error("没有更多可用的 token")
+                                        return
+
+                                    # 更新 token 并重试
+                                    self.api_key = next_token
+                                    headers = self._update_headers(headers, next_token)
+                                    continue
+                            except json.JSONDecodeError:
+                                pass
+
+                            logger.error(f"API 请求失败: {error_text}")
+                            return
+
+                        async for chunk in response.content.iter_any():
+                            yield chunk
+
+                # 如果成功完成，跳出循环
+                break
+
+            except Exception as e:
+                logger.error(f"请求 API 时发生错误: {e}")
+                return
+
+    def _update_headers(self, headers: dict, new_token: str) -> dict:
+        """根据 provider 更新请求头中的 token
+
+        Args:
+            headers: 原始请求头
+            new_token: 新的 token
+
+        Returns:
+            dict: 更新后的请求头
+        """
+        if self.provider == "anthropic":
+            headers["x-api-key"] = new_token
+        else:  # openrouter 或 oneapi
+            headers["Authorization"] = f"Bearer {new_token}"
+        return headers
+
     async def stream_chat(self, messages: list, model: str = "claude-3-5-sonnet-20241022") -> AsyncGenerator[tuple[str, str], None]:
         """流式对话
         
@@ -79,6 +223,7 @@ class ClaudeClient(BaseClient):
         
         async for chunk in self._make_request(headers, data):
             chunk_str = chunk.decode('utf-8')
+            #logger.info(f"claude_client{chunk_str}")
             if not chunk_str.strip():
                 continue
                 

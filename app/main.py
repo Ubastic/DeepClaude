@@ -63,8 +63,6 @@ async def chat_completions(request: Request):
         if not messages:
             return {"error": "messages 不能为空"}
         
-        if not body.get("stream", False):
-            return {"error": "目前仅支持流式输出，stream 必须为 True"}
         
         # 3. 创建 DeepClaude 实例
         if not DEEPSEEK_API_KEY or not CLAUDE_API_KEY:
@@ -72,22 +70,71 @@ async def chat_completions(request: Request):
             
         deep_claude = DeepClaude(
             DEEPSEEK_API_KEY, 
-            CLAUDE_API_KEY, 
+            "/app/app/tokens.json", #claude tokens
+            None,#CLAUDE_API_KEY, 
             DEEPSEEK_API_URL,
             CLAUDE_API_URL,
             CLAUDE_PROVIDER
         )
         
-        # 4. 返回流式响应
-        return StreamingResponse(
-            deep_claude.chat_completions_with_stream(
-                messages=messages,
-                deepseek_model=DEEPSEEK_MODEL,
-                claude_model=CLAUDE_MODEL
-            ),
-            media_type="text/event-stream"
+        # 3. 获取完整响应
+        response = await deep_claude.chat_completions(
+            messages=messages,
+            deepseek_model=DEEPSEEK_MODEL,
+            claude_model=CLAUDE_MODEL
         )
+        logger.info(response)
+        return {
+        "id": response.get("id", ""),
+        "object": "chat.completion",
+        "created": response.get("created", 0),
+        "model": response.get("model", ""),
+        "choices": [
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": response.get("choices", [])[0].get("message", {}).get("content", "") if response.get("choices") else ""
+                },
+                "finish_reason": response.get("choices", [])[0].get("finish_reason", "stop") if response.get("choices") else "stop"
+            }
+        ],
+        "usage": response.get("usage", {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0
+        })
+        }
+        '''
+        return {
+            "id": response.get("id", ""),
+            "object": "chat.completion",
+            "created": response.get("created", 0),
+            "model": response.get("model", ""),
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": response.get("content", "")
+                    },
+                    "finish_reason": "stop"
+                }
+            ],
+            "usage": response.get("usage", {})
+        }
+        '''
+        # 4. 返回流式响应
+        #return StreamingResponse(
+        #    deep_claude.chat_completions_with_stream(
+        #        messages=messages,
+        #        deepseek_model=DEEPSEEK_MODEL,
+        #        claude_model=CLAUDE_MODEL
+        #    ),
+        #    media_type="text/event-stream"
+        #)
         
+
     except Exception as e:
         logger.error(f"处理请求时发生错误: {e}")
         return {"error": str(e)}

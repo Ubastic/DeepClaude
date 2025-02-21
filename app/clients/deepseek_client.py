@@ -81,7 +81,7 @@ class DeepSeekClient(BaseClient):
                         if data and data.get("choices") and data["choices"][0].get("delta"):
                             delta = data["choices"][0]["delta"]
                             
-                            if model == "deepseek-reasoner" or model == "deepseek-ai/DeepSeek-R1":
+                            if model == "deepseek-reasoner" or model == "deepseek-ai/DeepSeek-R1" or "reasoning_content" in delta:
                                 # 处理 reasoning_content
                                 if delta.get("reasoning_content"):
                                     content = delta["reasoning_content"]
